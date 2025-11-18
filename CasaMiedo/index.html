@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Haunted Hotel – Linterna con ARO (fix rango/intensidad)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+  <style>
+    html,body{height:100%;margin:0;overflow:hidden;background:#000}
+    #renderCanvas{width:100%;height:100%;touch-action:none;display:block}
+    .hud{position:fixed;left:12px;bottom:10px;color:#9cf;font:12px monospace;background:#001222a6;padding:8px 10px;border:1px solid #8abaff55;border-radius:6px}
+  </style>
+</head>
+<body>
+<canvas id="renderCanvas"></canvas>
+<div class="hud">WASD/←↑→↓ mover · ratón mirar (clic) · Shift correr · Espacio salto · <b>L</b> linterna · <b>Home/End</b> subir/bajar ojo · <b>R</b> reubicar · <b>I</b> inspector</div>
+
+<script>
+(async function(){
+  const MODEL_ROOT="./models/", MODEL_FILE="halloween_haunted_hotel_rooms.glb";
+  let EYE=35.40;               // ⬆️ ojo más alto
+  const CAM_OFFSET = 0.30;
+
+  const canvas=document.getElementById("renderCanvas");
+  const engine=new BABYLON.Engine(canvas,true,{preserveDrawingBuffer:true,stencil:true});
+  const scene=new BABYLON.Scene(engine);
+  scene.clearColor=new BABYLON.Color4(0.01,0.01,0.015,1);
+
+  // Ambiente tenue (la linterna debe dominar)
+  const hemi=new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0,1,0), scene);
+  hemi.intensity=0.05;
+  scene.imageProcessingConfiguration.exposure = 0.9;
+
+  // Cámara 1ª persona (raycast)
+  const cam=new BABYLON.UniversalCamera("fps", new BABYLON.Vector3(0,EYE,-3), scene);
+  cam.attachControl(canvas,true);
+  cam.minZ=0.05; cam.inertia=0.05; cam.angularSensibility=1500;
+  scene.collisionsEnabled=false; cam.checkCollisions=false; cam.applyGravity=false;
+
+  const keys={};
+  addEventListener("keydown",e=>{keys[e.code]=true; if(e.key.toLowerCase()==="i") scene.debugLayer.show({overlay:true});});
+  addEventListener("keyup",e=>keys[e.code]=false);
+  canvas.addEventListener("click",()=>canvas.requestPointerLock && canvas.requestPointerLock());
+
+  // ===== Cookie en ARO (donut) =====
+  // Cookie suave y ligeramente elíptica para un haz menos circular y con bordes suaves
+  function makeSoftCookie(size=1024){
+    const dt=new BABYLON.DynamicTexture("cookie",{width:size,height:size},scene,false);
+    dt.hasAlpha = true;
+    const ctx=dt.getContext(), cx=size/2, cy=size/2, R=cx*0.98;
+    ctx.clearRect(0,0,size,size);
+
+    // Base radial suave
+    const base = ctx.createRadialGradient(cx,cy,R*0.05, cx,cy,R);
+    base.addColorStop(0.00, "rgba(255,255,255,0.95)");
+    base.addColorStop(0.45, "rgba(255,255,255,0.35)");
+    base.addColorStop(0.85, "rgba(255,255,255,0.12)");
+    base.addColorStop(1.00, "rgba(0,0,0,0)");
+    ctx.fillStyle = base; ctx.fillRect(0,0,size,size);
+
+    // Añadir centro elíptico para dar forma de foco (más largo en y)
+    ctx.save();
+    ctx.translate(cx,cy);
+    ctx.scale(1.0, 0.65); // aplanar para crear elíptico
+    ctx.beginPath();
+    ctx.ellipse(0,0, R*0.55, R*0.85, 0, 0, Math.PI*2);
+    ctx.fillStyle = "rgba(255,255,255,0.45)";
+    ctx.fill();
+    ctx.restore();
+
+    // Suavizar bordes con máscara radial tenue
+    const soft = ctx.createRadialGradient(cx,cy,R*0.6, cx,cy,R);
+    soft.addColorStop(0.0, "rgba(0,0,0,0)");
+    soft.addColorStop(1.0, "rgba(0,0,0,0.6)");
+    ctx.fillStyle = soft;
+    ctx.fillRect(0,0,size,size);
+
+    dt.update();
+    return dt;
+  }
+
+  // Linterna (params iniciales; el rango real se ajusta tras cargar el GLB)
+  // Crear la linterna como foco relativo a la cámara: posición local ligeramente adelantada
+  // y caída física para evitar que la intensidad sea no realista.
+  // Linterna robusta: spot con falloff estándar para comportamiento predecible
+  // Haz aún más estrecho y exponente alto para que la luz llegue más lejos (más 'profundo')
+  // Haz más suave: ángulo medio y exponent bajo para bordes suaves, y cookie elíptica
+  const flashlight = new BABYLON.SpotLight("flashlight",
+    cam.position.add(new BABYLON.Vector3(0, -0.05, 0.28)), // posición inicial en mundo
+    cam.getForwardRay().direction.clone(),
+    Math.PI/10, 8, scene
+  );
+  // Configuración recomendada por defecto para que la linterna sea visible
+  flashlight.diffuse   = new BABYLON.Color3(1.0,0.98,0.95);
+  flashlight.specular  = new BABYLON.Color3(1,1,1);
+  // valores por defecto aumentados para mayor profundidad
+  flashlight.intensity = 10.0;
+  flashlight.range = 260;
+  flashlight.falloffType = BABYLON.Light.FALLOFF_STANDARD; // más directo/esperable
+  // No usar cookie por defecto (puede producir artefactos o sobreexposición según la escena)
+  flashlight.projectionTexture = makeSoftCookie();
+  flashlight.setEnabled(true);
+
+  // Pequeño HUD de depuración para ajustar la linterna en vivo
+  const flashHud = document.createElement('div');
+  flashHud.id = 'flashHud';
+  Object.assign(flashHud.style, {position:'fixed',right:'12px',bottom:'10px',color:'#9cf',font:'12px monospace',background:'#001222a6',padding:'8px 10px',border:'1px solid #8abaff55',borderRadius:'6px',zIndex:9999});
+  document.body.appendChild(flashHud);
+  function updateFlashHud(){ flashHud.textContent = `Linterna — intensity: ${flashlight.intensity.toFixed(2)} · range: ${flashlight.range.toFixed(1)} · L: toggle · [:]-/[]:+`; }
+  updateFlashHud();
+
+  // Teclas para ajustar intensidad y rango en caliente
+  addEventListener('keydown', e=>{
+    if(e.key === '['){ flashlight.intensity = Math.max(0.1, flashlight.intensity - 0.25); updateFlashHud(); }
+    if(e.key === ']'){ flashlight.intensity = Math.min(20, flashlight.intensity + 0.25); updateFlashHud(); }
+    if(e.key === '<'){ flashlight.range = Math.max(5, flashlight.range - 2); updateFlashHud(); }
+    if(e.key === '>'){ flashlight.range = Math.min(200, flashlight.range + 2); updateFlashHud(); }
+  });
+
+  // Presets y toggle de cookie/proyección
+  addEventListener('keydown', e=>{
+  if(e.key === '1'){ flashlight.intensity = 3.0; flashlight.range = 60; updateFlashHud(); }
+  if(e.key === '2'){ flashlight.intensity = 10.0; flashlight.range = 260; updateFlashHud(); }
+  if(e.key === '3'){ flashlight.intensity = 28.0; flashlight.range = 380; updateFlashHud(); }
+    if(e.key.toLowerCase() === 'p'){
+      if(!flashlight.projectionTexture) flashlight.projectionTexture = makeRingCookie();
+      else flashlight.projectionTexture = null;
+      updateFlashHud();
+    }
+  });
+
+  // Cono visual suave (estético)
+  const cone = BABYLON.Mesh.CreateCylinder("beam", 5.4, 0.01, 2.4, 24, 1, scene, false);
+  const coneMat = new BABYLON.StandardMaterial("beamMat", scene);
+  coneMat.emissiveColor = new BABYLON.Color3(0.65,0.7,0.75);
+  coneMat.alpha = 0.06; // un poco más visible para ayudar al debug
+  cone.material = coneMat; cone.parent = cam; cone.position.z = 2.6; cone.rotation.x = Math.PI/2;
+
+  let flashlightEnabled = true;
+  addEventListener("keydown",e=>{ if(e.key.toLowerCase()==="l"){ flashlightEnabled=!flashlightEnabled; flashlight.setEnabled(flashlightEnabled); cone.setEnabled(flashlightEnabled);} });
+  scene.onBeforeRenderObservable.add(()=>{
+    const fwd = cam.getForwardRay().direction;
+    // normalizar la dirección y actualizar posición en coordenadas mundo
+  const dir = fwd.clone(); dir.normalize();
+  flashlight.direction = dir;
+  // asegurar que la posición del foco esté siempre ligeramente por delante de la cámara
+  flashlight.position = cam.position.add(dir.scale(0.28));
+  updateFlashHud();
+  });
+
+  // ===== Cargar GLB =====
+  const res=await BABYLON.SceneLoader.ImportMeshAsync(null, MODEL_ROOT, MODEL_FILE, scene);
+  const meshes=res.meshes.filter(m=>m.getTotalVertices()>0);
+  meshes.forEach(m=>{ m.isPickable=true; m.receiveShadows=true; });
+
+  // Calcular tamaño real de la escena para ajustar la LINTERN A
+  const mm= BABYLON.Mesh.MinMax(meshes);
+  const min=mm.min, max=mm.max, size=max.subtract(min), center=min.add(size.scale(0.5));
+  const sceneSpan = size.length();             // ~“diagonal” de la escena
+
+  // 🔧 Ajuste crítico: rango/intensidad según tamaño del hotel
+  // Limitar para evitar valores absurdos en escenas enormes. Los límites son conservadores
+  // pero pueden ajustarse tras probar en el navegador.
+  // Ajustar rango e intensidad en función del tamaño de la escena, con topes más altos
+  // Ajustar rango e intensidad en función del tamaño de la escena, con topes más altos
+  // para permitir que la linterna llegue más lejos en escenarios grandes.
+  // Ajuste dinámico con topes elevados para escenas grandes: permitir mayor profundidad
+  const computedRange = Math.min(400, Math.max(48, sceneSpan * 0.9));
+  flashlight.range = computedRange;
+  // Intensidad calculada con multiplicador superior para escenas grandes
+  flashlight.intensity = Math.min(40.0, Math.max(2.0, sceneSpan * 0.12));
+  // actualizar HUD con los valores calculados
+  if(typeof updateFlashHud === 'function') updateFlashHud();
+  // actualizar HUD con los valores calculados
+  if(typeof updateFlashHud === 'function') updateFlashHud();
+  // actualizar HUD con los valores calculados
+  if(typeof updateFlashHud === 'function') updateFlashHud();
+
+  // Detectar “piso” y ubicar jugador
+  function detectFloorY(list,bin=0.05){
+    const map=new Map(), tmp=new BABYLON.Vector3();
+    list.forEach(m=>{
+      const pos=m.getVerticesData(BABYLON.VertexBuffer.PositionKind); if(!pos) return;
+      const wm=m.getWorldMatrix();
+      for(let i=0;i<pos.length;i+=3){
+        tmp.set(pos[i],pos[i+1],pos[i+2]);
+        BABYLON.Vector3.TransformCoordinatesToRef(tmp, wm, tmp);
+        const key=Math.round(tmp.y/bin)*bin; map.set(key,(map.get(key)||0)+1);
+      }
+    });
+    let bestY=0,bestC=-1; map.forEach((c,y)=>{ if(c>bestC){bestC=c; bestY=parseFloat(y);} });
+    return bestY;
+  }
+  let floorY=detectFloorY(meshes,0.05);
+
+  const floorRef = BABYLON.MeshBuilder.CreateBox("floorRef",{width:size.x*1.02,height:0.5,depth:size.z*1.02},scene);
+  floorRef.position=new BABYLON.Vector3(center.x, floorY+0.25, center.z);
+  floorRef.isVisible=false; floorRef.isPickable=false;
+
+  function placePlayer(){
+    cam.position=new BABYLON.Vector3(center.x, floorY + EYE + CAM_OFFSET, center.z - Math.min(size.z*0.25, 6));
+    cam.setTarget(center.add(new BABYLON.Vector3(0,0.1,0)));
+  }
+  placePlayer();
+
+  // Ajuste fino de altura
+  addEventListener("keydown", e=>{
+    if (e.code === "Home") { EYE += 0.05; placePlayer(); }
+    if (e.code === "End")  { EYE -= 0.05; placePlayer(); }
+    if (e.key.toLowerCase()==="r") placePlayer();
+  });
+
+  // ===== Movimiento por raycasts =====
+  let run=false, jumpVel=0, grounded=true;
+  addEventListener("keydown",e=>{ if(e.key==="Shift") run=true; if(e.code==="Space"&&grounded){jumpVel=0.18; grounded=false;}});
+  addEventListener("keyup",e=>{ if(e.key==="Shift") run=false; });
+
+  function moveController(dt){
+    const baseSpeed = run?3.0:1.8, step=baseSpeed*dt;
+    let forward=0,strafe=0;
+    if(keys["KeyW"]||keys["ArrowUp"]) forward+=1;
+    if(keys["KeyS"]||keys["ArrowDown"]) forward-=1;
+    if(keys["KeyD"]||keys["ArrowRight"]) strafe-=1;
+    if(keys["KeyA"]||keys["ArrowLeft"]) strafe+=1;
+
+    let move=BABYLON.Vector3.Zero();
+    if(forward!==0||strafe!==0){
+      const dirF=cam.getForwardRay().direction; dirF.y=0; dirF.normalize();
+      const dirR=BABYLON.Vector3.Cross(dirF,BABYLON.Axis.Y).normalize();
+      move=dirF.scale(forward).add(dirR.scale(strafe)).normalize().scaleInPlace(step);
+    }
+
+    if(!move.equals(BABYLON.Vector3.Zero())){
+      const origin=cam.position.add(new BABYLON.Vector3(0,-0.2,0));
+      const ray=new BABYLON.Ray(origin, move.normalize(), 0.6);
+      const hit=scene.pickWithRay(ray, m=>m.isPickable && m!==floorRef);
+      if(!(hit && hit.hit && hit.distance<0.55)) cam.position.addInPlace(move);
+    }
+
+    if(!grounded){ cam.position.y+=jumpVel; jumpVel-=0.7*dt; if(jumpVel<=0) grounded=true; }
+    const targetY=floorY + EYE + CAM_OFFSET;
+    cam.position.y += (targetY - cam.position.y) * 0.3;
+  }
+
+  let last=performance.now()/1000;
+  engine.runRenderLoop(()=>{
+    const now=performance.now()/1000, dt=Math.min(0.033,Math.max(0.001,now-last)); last=now;
+    moveController(dt);
+    scene.render();
+  });
+  addEventListener("resize",()=>engine.resize());
+})();
+</script>
+</body>
+</html>

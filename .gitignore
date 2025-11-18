@@ -1,0 +1,14 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Editor
+.vscode/
+.DS_Store
+
+# http-server cache (si existiera)
+.cache/
+
+# Build/Distribución (si usas bundlers)
+dist/
+build/
